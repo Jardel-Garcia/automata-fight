@@ -113,6 +113,7 @@ kbd{display:block;font-size:5px;color:#8899bb;margin-top:3px;font-family:var(--m
 .bug-instr-text strong{color:var(--warn)}
 .bug-instr-key{display:inline-block;background:rgba(255,214,0,.15);border:1px solid var(--warn);border-radius:2px;padding:1px 6px;font-family:var(--px);font-size:7px;color:var(--warn);margin:0 2px}
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 </head>
 <body>
 
@@ -129,11 +130,25 @@ kbd{display:block;font-size:5px;color:#8899bb;margin-top:3px;font-family:var(--m
 </div>
 
 <div class="overlay" id="victory-overlay" style="display:none">
-  <div class="obox">
-    <h2>🏆 AUTÔMATO CORRIGIDO!</h2>
-    <p id="victory-text"></p>
-    <button class="gbtn" onclick="restartGame()">↺ JOGAR NOVAMENTE</button>
-	<br><br><br><p style="text-align: center; font-size:10px;color:var(--dim)">Automata-Fight - © Jardel Garcia - 2026 (<a href="https://www.instagram.com/_jardelgarcia_/" style="color:var(--dim)" target="_blank" rel="noopener noreferrer">@_jardelgarcia_</a>)</strong></p>
+  <div class="obox" style="max-width:560px">
+    <!-- Step 1: ask name -->
+    <div id="v-step1">
+      <h2>🏆 AUTÔMATO CORRIGIDO!</h2>
+      <p id="victory-text"></p>
+      <p style="font-size:12px;color:var(--warn);margin-bottom:6px;font-family:var(--px);font-size:8px">IDENTIFICAÇÃO</p>
+      <input id="student-name" type="text" placeholder="Seu nome completo"
+        style="width:100%;padding:10px 14px;background:#0a0b18;border:1px solid var(--accent);border-radius:3px;
+               color:var(--text);font-family:var(--mono);font-size:13px;margin-bottom:10px;outline:none"
+        onkeydown="if(event.key==='Enter')confirmName()"/>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:4px">
+        <button class="gbtn" style="border-color:var(--ok);color:var(--ok);flex:1" onclick="confirmName()">📄 GERAR RELATÓRIO PDF</button>
+        <button class="gbtn" style="border-color:var(--dim);color:var(--dim)" onclick="restartGame()">↺ JOGAR NOVAMENTE</button>
+      </div>
+    </div>
+    <!-- Step 2: generating indicator (brief) -->
+    <div id="v-step2" style="display:none;text-align:center;padding:20px 0">
+      <p style="font-family:var(--px);font-size:9px;color:var(--accent)">GERANDO PDF...</p>
+    </div>
   </div>
 </div>
 
@@ -225,6 +240,10 @@ let score=0, bugIdx=0, solvedBugs=[], currentBug=null;
 let bugActive=false, bugTriggered=false, bugSolved=false;
 let patchedAFD={}, player, enemy;
 const keys={};
+
+// ── Performance tracking ──────────────────────────────
+let gameStartTime=0, bugStartTime=0;
+const bugStats={}; // { bugId: {wrong:0, timeSec:0, wins:0, losses:0} }
 
 // ═══════════════════════════════
 // CORRECT AFD
@@ -524,29 +543,83 @@ class Fighter {
 // AI
 // ═══════════════════════════════
 class EnemyAI {
-  constructor(){this.think=0;this.interval=0.55;this.aggro=0.6}
+  constructor(){ this.think=0; this.applyPhase(); }
+
+  applyPhase(){
+    // Difficulty scales with bugIdx (0–4)
+    // phase 0: lenta e previsível  →  phase 4: rápida e agressiva
+    const phase = Math.min(bugIdx, 4);
+    const t = phase/4; // 0.0 → 1.0
+
+    this.interval    = 0.65 - t*0.30;   // 0.65s → 0.35s  (pensa mais rápido)
+    this.aggro       = 0.40 + t*0.35;   // 0.40  → 0.75   (ataca mais)
+    this.defReact    = 0.45 + t*0.30;   // 0.45  → 0.75   (defende mais contra ataques)
+    this.jumpReact   = 0.15 + t*0.20;   // 0.15  → 0.35   (pula para interceptar)
+    this.breakDefend = 0.20 + t*0.25;   // 0.20  → 0.45   (usa especial contra defesa)
+    this.comboChance = 0.00 + t*0.30;   // 0.00  → 0.30   (encadeia ações)
+    this.walkSpeed   = 130  + t*40;     // 130   → 170    (move mais rápido)
+  }
+
   update(dt,e,p){
+    // Re-apply phase every tick so it updates when bugIdx changes mid-fight
+    this.applyPhase();
     this.think+=dt;
     if(this.think<this.interval)return;
-    this.think=0;this.interval=.35+Math.random()*.55;
+    this.think=0;
+    // Randomize next think interval around current speed
+    this.interval=(this.interval*0.8)+Math.random()*(this.interval*0.5);
+
     if([ST.STUNNED,ST.ATTACK,ST.SPECIAL,ST.RECOVER,ST.AIRATTACK].includes(e.state))return;
+
     const dist=Math.abs(e.cx-p.cx);
-    const close=75, mid=150;
+    const close=75, mid=155;
+
     // Move toward player
     if(dist>close+12){
-      const dir=p.cx>e.cx?1:-1; e.vx=dir*135;
+      const dir=p.cx>e.cx?1:-1;
+      e.vx=dir*this.walkSpeed;
       if(e.state!==ST.JUMP)e.setState(ST.WALK);
-    } else { e.vx=0; if(e.state===ST.WALK)e.setState(ST.IDLE); }
+    } else {
+      e.vx=0;
+      if(e.state===ST.WALK)e.setState(ST.IDLE);
+    }
+
     if(dist>mid)return;
+
     const roll=Math.random();
-    if(p.state===ST.ATTACK||p.state===ST.SPECIAL){if(roll<.65){e.setState(ST.DEFEND);return}}
-    if(p.state===ST.JUMP||p.state===ST.AIRATTACK){if(roll<.3&&e.onGround){e.setState(ST.JUMP);e.vy=-510;e.onGround=false;return}}
-    if(p.state===ST.DEFEND){if(roll<.3){e.setState(ST.SPECIAL);return}}
+
+    // React to player attacking → defend
+    if(p.state===ST.ATTACK||p.state===ST.SPECIAL){
+      if(roll<this.defReact){ e.setState(ST.DEFEND); return; }
+    }
+    // React to player jumping → jump to intercept
+    if(p.state===ST.JUMP||p.state===ST.AIRATTACK){
+      if(roll<this.jumpReact&&e.onGround){
+        e.setState(ST.JUMP); e.vy=-510; e.onGround=false; return;
+      }
+    }
+    // Break player's defense with special
+    if(p.state===ST.DEFEND){
+      if(roll<this.breakDefend){ e.setState(ST.SPECIAL); return; }
+    }
+
+    // Main aggression window
     if(dist<=close&&roll<this.aggro){
       const r2=Math.random();
-      if(r2<.55)e.setState(ST.ATTACK);
-      else if(r2<.75&&e.onGround){e.setState(ST.JUMP);e.vy=-510;e.onGround=false;}
-      else e.setState(ST.SPECIAL);
+      if(r2<0.50){
+        e.setState(ST.ATTACK);
+        // Combo: chain a second action after attack (higher phases only)
+        if(Math.random()<this.comboChance){
+          setTimeout(()=>{
+            if(e.state===ST.IDLE&&Math.abs(e.cx-p.cx)<close+20)
+              e.setState(Math.random()<0.5?ST.ATTACK:ST.SPECIAL);
+          }, 380);
+        }
+      } else if(r2<0.72&&e.onGround){
+        e.setState(ST.JUMP); e.vy=-510; e.onGround=false;
+      } else {
+        e.setState(ST.SPECIAL);
+      }
     }
   }
 }
@@ -589,11 +662,13 @@ function checkHits(){
 function onKO(f){
   if(f.isPlayer){
     SFX.ko();
+    if(currentBug && bugStats[currentBug.id]) bugStats[currentBug.id].losses++;
     showSplash('K.O.!!');
     log('💀 Você foi nocauteado! Recomeçando o round para tentar o bug de novo...','bug');
     setTimeout(()=>resetRound(),1600);
   } else {
     SFX.win();
+    if(currentBug && bugStats[currentBug.id]) bugStats[currentBug.id].wins++;
     showSplash('INIMIGO DERROTADO!');
     log('🏆 Inimigo derrotado! Mas o bug ainda está ativo — tente reproduzi-lo antes de continuar.','warn');
     setTimeout(()=>{ enemy.hp=100; enemy.x=W-158; enemy.setState(ST.IDLE); updateHUD(); },1800);
@@ -766,6 +841,7 @@ function loadBug(){
   if(bugIdx>=BUGS.length){showVictory();return;}
   currentBug=BUGS[bugIdx];bugActive=true;bugSolved=false;bugTriggered=false;
   lastAction=null; lastActionTime=0;
+  bugStats[currentBug.id]={wrong:0,timeSec:0,wins:0,losses:0};
   buildAFD();
   document.getElementById('ph').textContent=bugIdx+1;
   updateProgress();hideBugPanel();drawDiagram();
@@ -794,6 +870,7 @@ function hideBugInstruction(){
 
 function triggerBugPanel(){
   if(bugTriggered)return;bugTriggered=true;
+  bugStartTime=performance.now();
   SFX.bugDetected();
   setJumpHint('');
   hideBugInstruction();
@@ -836,12 +913,18 @@ function answer(correct,btn){
   } else {
     SFX.wrong();
     btn.classList.add('wrong');player.takeDamage(8);
+    if(currentBug) bugStats[currentBug.id].wrong++;
     log('❌ Incorreto! −8 HP. Tente de novo.','bug');
     setTimeout(()=>{btn.classList.remove('wrong');btn.disabled=true;btn.style.opacity='.3';},500);
   }
 }
 
 function advanceBug(){
+  // record time spent on this bug's question
+  if(currentBug && bugStartTime>0){
+    bugStats[currentBug.id].timeSec=Math.round((performance.now()-bugStartTime)/1000);
+    bugStartTime=0;
+  }
   bugIdx++;player.hp=Math.min(100,player.hp+30);enemy.hp=100;updateHUD();
   hideBugInstruction();
   if(bugIdx>=BUGS.length){showVictory();return;}
@@ -912,9 +995,9 @@ function showVictory(){
   SFX.victory();
   document.getElementById('victory-text').innerHTML=`Você corrigiu todos os <strong>${BUGS.length} bugs</strong> e dominou o autômato!<br><br>
   ✅ <strong>AFD garante determinismo</strong> — um estado + entrada = exatamente um destino.<br>
-  ✅ <strong>Estado vazio</strong> na transição = input descartado (não aceito).<br>
-  ✅ <strong>Estados intermediários</strong> (RECUPERANDO) evitam atalhos e que aceitariam cadeias incorretas (exploits).<br>
-  ✅ <strong>AFN</strong> permite múltiplos destinos — poderoso para modelagem, mas requer conversões complexas por algoritmos para executar como AFD.`;
+  ✅ <strong>Célula vazia</strong> na tabela de transições = input descartado (não aceito).<br>
+  ✅ <strong>Estados intermediários</strong> (RECUPERANDO) evitam atalhos e exploits.<br>
+  ✅ <strong>AFN</strong> permite múltiplos destinos — poderoso para modelagem, mas requer conversão (subset construction) para executar como AFD.`;
   document.getElementById('victory-overlay').style.display='flex';
 }
 
@@ -943,6 +1026,7 @@ requestAnimationFrame(loop);
 // ═══════════════════════════════
 function startGame(){
   SFX.init();
+  gameStartTime=Date.now();
   document.getElementById('intro-overlay').style.display='none';
   player=new Fighter(120,true,true);enemy=new Fighter(W-158,false,false);
   ai=new EnemyAI();gameStarted=true;lastTime=performance.now();timerSec=60;
@@ -953,18 +1037,23 @@ function startGame(){
 
 function restartGame(){
   SFX.init();
+  gameStartTime=0;
+  Object.keys(bugStats).forEach(k=>delete bugStats[k]);
+  document.getElementById('v-step1').style.display='block';
+  document.getElementById('v-step2').style.display='none';
+  document.getElementById('student-name').value='';
+  const err = document.getElementById('name-error');
+  if(err) err.remove();
   document.getElementById('victory-overlay').style.display='none';
-  document.getElementById('logw').innerHTML='';
+  // reset all game state
   score=0;bugIdx=0;solvedBugs=[];
   document.getElementById('sc').textContent='0';
   document.getElementById('sc-hud').textContent='0';
-  player=new Fighter(120,true,true);enemy=new Fighter(W-158,false,false);
-  ai=new EnemyAI();gameStarted=true;lastTime=performance.now();timerSec=60;
   bugActive=false;bugSolved=false;bugTriggered=false;currentBug=null;
+  gameStarted=false;
   hideBugInstruction();
-  buildAFD();updateProgress();updateHUD();drawDiagram();
-  showSplash('FIGHT!');setTimeout(loadBug,700);
-  log('🔄 Reiniciado!','ok');
+  // show intro again
+  document.getElementById('intro-overlay').style.display='flex';
 }
 
 // ═══════════════════════════════
@@ -1037,6 +1126,198 @@ const SFX = (() => {
     victory()     { const mel=[523,523,523,415,622,554,523,494,440,659],dur=[120,120,120,80,360,120,120,120,120,360]; let t=0; mel.forEach((f,i)=>{ setTimeout(()=>play(ac=>{ const g=env(ac,.01,.05,.15,.3); osc(ac,'square',f,g,dur[i]/1000+.1); const g2=env(ac,.01,.05,.15,.12); osc(ac,'sine',f*2,g2,dur[i]/1000+.1); }),t); t+=dur[i]; }); },
   };
 })();
+
+// ═══════════════════════════════
+// NAME CONFIRM + PDF
+// ═══════════════════════════════
+function confirmName(){
+  const inp = document.getElementById('student-name');
+  const name = inp.value.trim();
+  if(!name){
+    inp.style.borderColor='var(--danger)';
+    let err = document.getElementById('name-error');
+    if(!err){ err=document.createElement('p'); err.id='name-error'; err.style.cssText='color:var(--danger);font-size:11px;margin:-6px 0 8px;font-family:var(--mono)'; inp.after(err); }
+    err.textContent='Campo obrigatorio. Por favor, informe seu nome.';
+    return;
+  }
+  const err = document.getElementById('name-error');
+  if(err) err.remove();
+  document.getElementById('v-step1').style.display='none';
+  document.getElementById('v-step2').style.display='block';
+  setTimeout(()=>generatePDF(name), 120);
+}
+
+function generatePDF(studentName){
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ orientation:'portrait', unit:'mm', format:'a4' });
+  const pw = 210, ph = 297;
+  const pad = 18;
+
+  // ── helpers ──────────────────────────────────────────
+  const hex2rgb = h => { h=h.replace('#',''); return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)]; };
+  const setFill  = h => { const [r,g,b]=hex2rgb(h); doc.setFillColor(r,g,b); };
+  const setStroke= h => { const [r,g,b]=hex2rgb(h); doc.setDrawColor(r,g,b); };
+  const setTxt   = h => { const [r,g,b]=hex2rgb(h); doc.setTextColor(r,g,b); };
+
+  // ── background ───────────────────────────────────────
+  setFill('#07080f'); doc.rect(0,0,pw,ph,'F');
+
+  // subtle grid lines
+  doc.setLineWidth(0.1); setStroke('#1a1d2e');
+  for(let y=0;y<ph;y+=8){ doc.line(0,y,pw,y); }
+
+  // top accent bar
+  setFill('#00e5ff'); doc.rect(0,0,pw,1.2,'F');
+  setFill('#0a2030');  doc.rect(0,1.2,pw,36,'F');
+
+  // ── header ───────────────────────────────────────────
+  setTxt('#00e5ff');
+  doc.setFont('helvetica','bold'); doc.setFontSize(18);
+  doc.text('AUTOMATA-FIGHT', pw/2, 16, {align:'center'});
+  doc.setFontSize(8); setTxt('#7a9ab8');
+  doc.text('RELATÓRIO DE DESEMPENHO — TEORIA DA COMPUTAÇÃO E COMPILADORES', pw/2, 23, {align:'center'});
+
+  // student name box
+  setFill('#0d1a2a'); doc.roundedRect(pad, 28, pw-pad*2, 10, 2, 2, 'F');
+  setTxt('#e8f0ff'); doc.setFontSize(10); doc.setFont('helvetica','bold');
+  doc.text(studentName, pw/2, 35, {align:'center'});
+
+  // ── metadata row ─────────────────────────────────────
+  const now = new Date();
+  const dateStr = now.toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit',year:'numeric'});
+  const timeStr = now.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
+  const totalSec = Math.round((Date.now()-gameStartTime)/1000);
+  const mm = String(Math.floor(totalSec/60)).padStart(2,'0');
+  const ss = String(totalSec%60).padStart(2,'0');
+
+  const meta = [
+    {label:'DATA', val:dateStr},
+    {label:'HORA', val:timeStr},
+    {label:'TEMPO TOTAL', val:`${mm}:${ss}`},
+    {label:'PONTUAÇÃO', val:`${score} / ${BUGS.length}`},
+  ];
+  const mw = (pw-pad*2)/meta.length;
+  meta.forEach((m,i)=>{
+    const mx = pad + i*mw + mw/2;
+    setFill('#111828'); doc.roundedRect(pad+i*mw+1, 42, mw-2, 13, 1.5,1.5,'F');
+    setTxt('#7a9ab8'); doc.setFont('helvetica','normal'); doc.setFontSize(6);
+    doc.text(m.label, mx, 47.5, {align:'center'});
+    setTxt('#00e5ff'); doc.setFont('helvetica','bold'); doc.setFontSize(9);
+    doc.text(m.val, mx, 53, {align:'center'});
+  });
+
+  // ── section title ─────────────────────────────────────
+  let y = 62;
+  setTxt('#ffd600'); doc.setFont('helvetica','bold'); doc.setFontSize(8);
+  doc.text('DESEMPENHO POR BUG', pad, y);
+  setStroke('#2e3358'); doc.setLineWidth(0.3);
+  doc.line(pad, y+2, pw-pad, y+2);
+  y += 7;
+
+  // ── bug cards (22mm cada, gap 3mm) → 5×25 = 125mm ────
+  const bugColors = ['#00e5ff','#ff6633','#ff2d55','#3388ff','#bb55ff'];
+  const concepts  = ['Transicao de saida ausente','delta indefinido = input ignorado','delta(q,a) indefinido bloqueia o input','Estado intermediario obrigatorio','AFD: destino unico por transicao'];
+
+  BUGS.forEach((b,i)=>{
+    const st = bugStats[b.id] || {wrong:0,timeSec:0};
+    const solved = solvedBugs.includes(b.id);
+    const col = bugColors[i];
+    const cardH = 22;
+
+    setFill('#0d1120'); doc.roundedRect(pad, y, pw-pad*2, cardH, 2,2,'F');
+    const [cr,cg,cb]=hex2rgb(col);
+    doc.setFillColor(cr,cg,cb,0.9); doc.roundedRect(pad, y, 3, cardH, 1,1,'F');
+
+    setTxt(col); doc.setFont('helvetica','bold'); doc.setFontSize(8);
+    doc.text(`BUG #${b.id}`, pad+6, y+6.5);
+    setTxt('#e8f0ff'); doc.setFont('helvetica','normal'); doc.setFontSize(7);
+    const bname = b.bugName.replace(/^BUG #\d+ — /,'');
+    doc.text(bname, pad+6, y+12);
+    setTxt('#5a7a99'); doc.setFontSize(6);
+    doc.text(`Conceito: ${concepts[i]}`, pad+6, y+17);
+
+    const rx = pw-pad-6;
+    const badgeCol = solved ? '#00e676' : '#ff2d55';
+    const badgeTxt = solved ? 'CORRETO' : 'PULADO';
+    const [br,bg2,bb]=hex2rgb(badgeCol);
+    doc.setFillColor(br,bg2,bb); doc.roundedRect(rx-26, y+2.5, 28, 7, 1,1,'F');
+    setTxt(solved ? '#07080f' : '#ffffff');
+    doc.setFont('helvetica','bold'); doc.setFontSize(6.5);
+    doc.text(badgeTxt, rx-12, y+7.5, {align:'center'});
+
+    setTxt('#7a9ab8'); doc.setFont('helvetica','normal'); doc.setFontSize(6);
+    doc.text(`Erros: ${st.wrong}`, rx-26, y+14, {align:'left'});
+    const ts2 = st.timeSec>0 ? `${st.timeSec}s` : '—';
+    doc.text(`Resp.: ${ts2}`, rx-26, y+19, {align:'left'});
+
+    y += cardH + 3;
+  });
+  // y agora ≈ 62+7 + 5×25 = 194mm
+
+  // ── summary bar (24mm) → y ≈ 222mm ───────────────────
+  y += 2;
+  const totalWrong  = BUGS.reduce((a,b2)=>(bugStats[b2.id]?a+bugStats[b2.id].wrong:a),0);
+  const totalWins   = BUGS.reduce((a,b2)=>(bugStats[b2.id]?a+bugStats[b2.id].wins:a),0);
+  const totalLosses = BUGS.reduce((a,b2)=>(bugStats[b2.id]?a+bugStats[b2.id].losses:a),0);
+  const pct = Math.round((score/BUGS.length)*100);
+
+  setFill('#0d1120'); doc.roundedRect(pad, y, pw-pad*2, 24, 2,2,'F');
+  setFill('#1a1d2e'); doc.roundedRect(pad+6, y+3, pw-pad*2-12, 2.5, 1,1,'F');
+  setFill(pct>=80?'#00e676':pct>=60?'#ffd600':'#ff2d55');
+  doc.roundedRect(pad+6, y+3, (pw-pad*2-12)*(pct/100), 2.5, 1,1,'F');
+
+  const sumItems = [
+    {val:`${pct}%`,        label:'ACERTOS',  col:'#ffd600'},
+    {val:`${totalWrong}`,  label:'ERROS',    col:'#ff6633'},
+    {val:`${totalWins}`,   label:'VITORIAS', col:'#00e676'},
+    {val:`${totalLosses}`, label:'DERROTAS', col:'#ff2d55'},
+    {val:`${mm}:${ss}`,    label:'DURACAO',  col:'#00e5ff'},
+  ];
+  const sw2 = (pw-pad*2)/sumItems.length;
+  sumItems.forEach((s,i)=>{
+    const sx = pad+i*sw2+sw2/2;
+    setTxt(s.col); doc.setFont('helvetica','bold'); doc.setFontSize(10);
+    doc.text(s.val, sx, y+13, {align:'center'});
+    setTxt('#5a7a99'); doc.setFont('helvetica','normal'); doc.setFontSize(5.5);
+    doc.text(s.label, sx, y+19, {align:'center'});
+  });
+  y += 28; // y ≈ 222+28 = 250mm
+
+  // ── theory recap (3 linhas × 10mm + título 12mm = 42mm) → y ≈ 292mm ──
+  setTxt('#ffd600'); doc.setFont('helvetica','bold'); doc.setFontSize(8);
+  doc.text('CONCEITOS REVISADOS', pad, y);
+  setStroke('#2e3358'); doc.setLineWidth(0.3);
+  doc.line(pad, y+2, pw-pad, y+2);
+  y += 7;
+
+  const theory = [
+    'AFD: d(q,a) retorna exatamente um estado, ou e indefinido — input descartado sem travar o sistema.',
+    'Estados intermediarios como RECUPERANDO garantem sequencias obrigatorias de transicao entre estados.',
+    'AFN: d(q,a) pode retornar multiplos estados — util para modelagem, mas exige conversao para AFD.',
+  ];
+  theory.forEach(line=>{
+    setFill('#0d1120'); doc.roundedRect(pad, y, pw-pad*2, 8, 1.5,1.5,'F');
+    setTxt('#3388ff'); doc.setFont('helvetica','bold'); doc.setFontSize(7);
+    doc.text('>', pad+4, y+5.5);
+    setTxt('#9ab0c8'); doc.setFont('helvetica','normal'); doc.setFontSize(6.5);
+    doc.text(line, pad+9, y+5.5, {maxWidth: pw-pad*2-14});
+    y += 10;
+  });
+  // y ≈ 250+7+30 = 287mm — folga de ~8mm antes do rodapé
+
+  // ── footer ───────────────────────────────────────────
+  setFill('#00e5ff'); doc.rect(0,ph-1.2,pw,1.2,'F');
+  setTxt('#3a5070'); doc.setFont('helvetica','normal'); doc.setFontSize(6);
+  doc.text('AutomataFight © Jardel Garcia 2026 — Teoria da Computacao e Compiladores', pw/2, ph-5, {align:'center'});
+
+  // ── save ─────────────────────────────────────────────
+  const safeName = studentName.replace(/\s+/g,'-').toLowerCase();
+  doc.save(`automata-fight-${safeName}-${dateStr.replace(/\//g,'-')}.pdf`);
+
+  // return to victory screen with restart option
+  document.getElementById('v-step2').style.display='none';
+  document.getElementById('v-step1').style.display='block';
+}
 
 // Keyboard
 document.addEventListener('keydown',e=>{
